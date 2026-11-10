@@ -1,0 +1,68 @@
+name: Build store
+
+on:
+  schedule:
+    - cron: "37 6 * * *" # daily, after Keiyoushi's usual overnight builds
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Convert every extension again (ignore the previous run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: store
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Android build tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;37.0.0" "platforms;android-34" > /dev/null
+          echo "ANDROID_BUILD_TOOLS=$ANDROID_HOME/build-tools/37.0.0" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-34/android.jar" >> "$GITHUB_ENV"
+
+      - name: Previous run
+        run: |
+          if git fetch -q --depth=1 origin repo 2>/dev/null; then
+            git show FETCH_HEAD:state.json > "$RUNNER_TEMP/prev-state.json"
+          fi
+
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "KEYSTORE_B64 secret is not set"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/a6.jks"
+
+      - name: Convert
+        env:
+          A6_KEYSTORE: ${{ runner.temp }}/a6.jks
+          A6_KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          A6_KS_ALIAS: ext
+        run: |
+          prev=()
+          if [ "${{ inputs.full }}" != "true" ] && [ -f "$RUNNER_TEMP/prev-state.json" ]; then
+            prev=(--prev-state "$RUNNER_TEMP/prev-state.json")
+          fi
+          python3 -I scripts/build_store.py --repo "$GITHUB_REPOSITORY" --out out \
+            --work "$RUNNER_TEMP/work" --jobs 4 "${prev[@]}"
+          cat out/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/publish.py --out out --repo "$GITHUB_REPOSITORY"
