@@ -33,6 +33,7 @@ sys.path.insert(0, HERE)
 
 import a6conv  # noqa: E402
 import libs  # noqa: E402
+import storepb  # noqa: E402
 
 KEIYOUSHI_INDEX = "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.json"
 WARNINGS = {
@@ -60,6 +61,38 @@ def fetch(url, path=None, tries=4):
             if attempt == tries - 1:
                 raise
             time.sleep(2 * (attempt + 1))
+
+
+def _jar_count(idx):
+    """Extensions with a .jar link, or -1 if this isn't a store index at all."""
+    try:
+        return sum(1 for e in idx["extensionList"]["extensions"] if e["resources"].get("jarUrl"))
+    except (KeyError, TypeError, AttributeError):
+        return -1
+
+
+def load_keiyoushi(src):
+    """Read Keiyoushi's index.json; fall back to the index.pb beside it if the JSON is
+    missing, unreadable or has no .jar links. Returns (index, the file it came from)."""
+    def read(s):
+        data = fetch(s) if s.startswith("http") else open(s, "rb").read()
+        return storepb.parse(data) if s.endswith(".pb") else json.loads(data)
+
+    try:
+        idx = read(src)
+        if _jar_count(idx) > 0:
+            return idx, src
+        problem = "no extensions with a .jar link"
+    except Exception as ex:
+        problem = "%s: %s" % (type(ex).__name__, ex)
+    if not src.endswith(".json"):
+        raise RuntimeError("Keiyoushi index %s unusable (%s)" % (src, problem))
+    pb = src[:-len(".json")] + ".pb"
+    log("index.json unusable (%s); trying %s" % (problem, pb))
+    idx = read(pb)
+    if _jar_count(idx) <= 0:
+        raise RuntimeError("neither %s (%s) nor %s has extensions with a .jar link" % (src, problem, pb))
+    return idx, pb
 
 
 def shard_tag(pkg, shards):
@@ -127,10 +160,7 @@ def main():
                           os.path.join(a.work, "tc"), keystore, ks_pass, alias)
     fingerprint = signing_fingerprint(java_home, keystore, alias)
 
-    if a.keiyoushi.startswith("http"):
-        kidx = json.loads(fetch(a.keiyoushi))
-    else:
-        kidx = json.load(open(a.keiyoushi, encoding="utf-8"))
+    kidx, kidx_from = load_keiyoushi(a.keiyoushi)
     exts = kidx["extensionList"]["extensions"]
     if a.only:
         wanted = set(a.only.split(","))
@@ -242,7 +272,7 @@ def main():
     lines = [
         "# Last run",
         "",
-        "- Keiyoushi extensions: %d" % len(exts),
+        "- Keiyoushi extensions: %d (from `%s`)" % (len(exts), kidx_from.rsplit("/", 1)[-1]),
         "- Published: %d" % len(published),
         "- Converted this run: %d" % len(done),
         "- Failed this run: %d (%d kept their previous version)" % (len(failed), len(kept_old)),

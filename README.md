@@ -41,6 +41,8 @@ conversion fails, the previous converted version stays in the store; `report.md`
 
 - `.github/workflows/store.yml`: the daily job (also runs on demand; "full" reconverts everything).
 - `scripts/build_store.py`: reads Keiyoushi's `index.json`, converts what changed, writes the store index.
+  If `index.json` is missing, unreadable or has no `.jar` links, it reads `index.pb` instead
+  (`scripts/storepb.py`), and `report.md` says which one was used.
 - `scripts/publish.py`: uploads APKs to the `apks-N` releases, force-pushes the `repo` branch, prunes old APKs.
 - `scripts/a6conv.py`, `axml.py`, `dexrefs.py`: the converter.
 
