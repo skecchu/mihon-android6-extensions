@@ -35,6 +35,12 @@ jobs:
           echo "ANDROID_BUILD_TOOLS=$ANDROID_HOME/build-tools/37.0.0" >> "$GITHUB_ENV"
           echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-34/android.jar" >> "$GITHUB_ENV"
 
+      - name: Library cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/work/libs
+          key: libs-${{ hashFiles('scripts/libs.py') }}
+
       - name: Previous run
         run: |
           if git fetch -q --depth=1 origin repo 2>/dev/null; then

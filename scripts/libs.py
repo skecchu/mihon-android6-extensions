@@ -10,6 +10,8 @@ import hashlib
 import os
 import shutil
 import sys
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -48,6 +50,27 @@ def sha256(path):
     return h.hexdigest()
 
 
+def _download(url, path, tries=5):
+    """Download url to path, retrying rate limits (429) and server/network errors."""
+    for attempt in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "a6-extension-converter"})
+            with urllib.request.urlopen(req, timeout=120) as r, open(path + ".part", "wb") as f:
+                shutil.copyfileobj(r, f)
+            os.replace(path + ".part", path)
+            return
+        except Exception as e:
+            if attempt == tries - 1 or (isinstance(e, urllib.error.HTTPError)
+                                        and e.code < 500 and e.code != 429):
+                raise
+            wait = 10 * 2 ** attempt
+            retry_after = getattr(e, "headers", None) and e.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                wait = max(wait, min(int(retry_after), 300))
+            print("download failed (%s), retrying in %ds: %s" % (e, wait, url), flush=True)
+            time.sleep(wait)
+
+
 def _from_gradle(cache, group, artifact, version, want):
     base = os.path.join(cache, group, artifact, version)
     if not os.path.isdir(base):
@@ -72,8 +95,7 @@ def fetch(dest, gradle_cache=None):
                 shutil.copyfile(src, path)
             else:
                 url = "%s/%s/%s/%s/%s-%s.%s" % (repo, group.replace(".", "/"), artifact, version, artifact, version, ext)
-                urllib.request.urlretrieve(url, path + ".part")
-                os.replace(path + ".part", path)
+                _download(url, path)
         got = sha256(path)
         if got != want:
             raise SystemExit("checksum mismatch for %s: %s" % (path, got))

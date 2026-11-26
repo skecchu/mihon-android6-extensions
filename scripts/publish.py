@@ -11,7 +11,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STORE_README = """# Android 6 extension store
@@ -26,19 +28,49 @@ See `report.md` for the last run.
 """
 
 
+def retry(fn, tries=4):
+    """Run fn, retrying with backoff; the GitHub API sometimes answers 5xx."""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except subprocess.CalledProcessError:
+            if attempt == tries - 1:
+                raise
+            wait = 5 * 3 ** attempt
+            print("command failed, retrying in %ds" % wait, flush=True)
+            time.sleep(wait)
+
+
 def gh(*args, capture=False):
-    r = subprocess.run(["gh"] + list(args), check=True, text=True,
-                       stdout=subprocess.PIPE if capture else None)
-    return r.stdout if capture else None
+    def run():
+        r = subprocess.run(["gh"] + list(args), check=True, text=True,
+                           stdout=subprocess.PIPE if capture else None)
+        return r.stdout if capture else None
+    return retry(run)
 
 
 def ensure_release(repo, tag):
-    if subprocess.run(["gh", "release", "view", tag, "--repo", repo],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        return
-    gh("release", "create", tag, "--repo", repo, "--title", "Extension APKs (%s)" % tag,
-       "--notes", "Converted extension APKs used by the store index. Updated daily; not meant to be downloaded by hand.",
-       "--latest=false")
+    def run():
+        if subprocess.run(["gh", "release", "view", tag, "--repo", repo],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            return
+        subprocess.run(["gh", "release", "create", tag, "--repo", repo, "--title", "Extension APKs (%s)" % tag,
+                        "--notes", "Converted extension APKs used by the store index. Updated daily; not meant to be downloaded by hand.",
+                        "--latest=false"], check=True)
+    retry(run)
+
+
+def delete_asset(repo, tag, name):
+    """Delete a release asset. True if it is gone (including if a retry finds it already gone)."""
+    for attempt in range(4):
+        r = subprocess.run(["gh", "release", "delete-asset", tag, name, "--repo", repo, "-y"],
+                           text=True, stderr=subprocess.PIPE)
+        if r.returncode == 0 or "not found" in r.stderr.lower():
+            return True
+        sys.stderr.write(r.stderr)
+        if attempt < 3:
+            time.sleep(5 * 3 ** attempt)
+    return False
 
 
 def main():
@@ -82,7 +114,9 @@ def main():
     subprocess.run(git + ["push", "-q", "-f", remote, "HEAD:" + a.branch], check=True)
     print("store branch updated", flush=True)
 
-    # Prune APKs the index no longer points at.
+    # Prune APKs the index no longer points at. The store is already published at this
+    # point, so a failure here only leaves stale files for the next run to remove.
+    failed = 0
     releases = json.loads(gh("release", "list", "--repo", a.repo, "--limit", "100", "--json", "tagName", capture=True))
     for rel in releases:
         tag = rel["tagName"]
@@ -90,10 +124,12 @@ def main():
             continue
         assets = json.loads(gh("release", "view", tag, "--repo", a.repo, "--json", "assets", capture=True))["assets"]
         stale = [x["name"] for x in assets if x["name"] not in wanted.get(tag, set())]
-        for name in stale:
-            gh("release", "delete-asset", tag, name, "--repo", a.repo, "-y")
+        gone = sum(1 for name in stale if delete_asset(a.repo, tag, name))
+        failed += len(stale) - gone
         if stale:
-            print("pruned %d from %s" % (len(stale), tag), flush=True)
+            print("pruned %d from %s" % (gone, tag), flush=True)
+    if failed:
+        print("::warning::could not prune %d stale APKs; the next run will try again" % failed, flush=True)
 
 
 if __name__ == "__main__":
